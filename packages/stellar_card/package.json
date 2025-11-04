@@ -1,0 +1,14 @@
+{
+  "name": "stellar_card",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^11.2.2",
+    "@soroban-react/core": "^3.0.0"
+  }
+}
+
