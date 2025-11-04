@@ -3,18 +3,23 @@ import {
   isConnected as freighterIsConnected,
   isAllowed as freighterIsAllowed,
   setAllowed as freighterSetAllowed,
-  getPublicKey as freighterGetPublicKey,
+  getAddress as freighterGetAddress,
+  getNetwork as freighterGetNetwork,
+  signTransaction as freighterSignTransaction,
 } from "@stellar/freighter-api";
 import { useSorobanReact } from "@soroban-react/core";
 import * as Client from "@stellar_card/index.js";
 import "./App.css";
 
 // Contract configuration - Update this with your deployed contract ID
-const CONTRACT_ID = process.env.VITE_CONTRACT_ID || "YOUR_CONTRACT_ID_HERE";
+const CONTRACT_ID =
+  process.env.VITE_CONTRACT_ID ||
+  "CDQ4LCGKICDNAQKRFGPCTDVDNWUU7JIVXGWKGSPA3A5A44Q45PCB7PD4";
 
 function App() {
   const sorobanReact = useSorobanReact();
-  const { activeChain, address, connect, disconnect } = sorobanReact;
+  const { activeChain, connect, disconnect } = sorobanReact;
+  const [walletAddress, setWalletAddress] = useState(null);
 
   const [contract, setContract] = useState(null);
   const [totalSupply, setTotalSupply] = useState(0);
@@ -37,22 +42,40 @@ function App() {
 
   // Initialize contract when wallet is connected
   useEffect(() => {
-    if (activeChain && address) {
+    console.debug("[StellarCard] useEffect fired", {
+      activeChain,
+      address: walletAddress,
+    });
+    if (activeChain && walletAddress) {
+      console.debug("[StellarCard] Initializing contract client", {
+        network: "testnet",
+        address: walletAddress,
+      });
       const contractClient = new Client.Client({
         ...Client.networks.testnet,
         rpcUrl: "https://soroban-testnet.stellar.org:443",
         contractId: CONTRACT_ID,
         wallet: {
-          address: address,
-          signTransaction: sorobanReact.signTransaction,
+          address: walletAddress,
+          signTransaction: async (xdr) => {
+            const res = await freighterSignTransaction(xdr, {
+              network: "TESTNET",
+              networkPassphrase: "Test SDF Network ; September 2015",
+              address: walletAddress,
+            });
+            return res?.signedTxXdr ?? res;
+          },
         },
       });
       setContract(contractClient);
       loadTotalSupply();
     } else {
+      console.debug(
+        "[StellarCard] No activeChain or address; clearing contract"
+      );
       setContract(null);
     }
-  }, [activeChain, address, sorobanReact]);
+  }, [activeChain, walletAddress, sorobanReact]);
 
   const loadTotalSupply = async () => {
     if (!contract) return;
@@ -69,26 +92,66 @@ function App() {
 
   const handleConnect = async () => {
     try {
+      console.debug("[StellarCard] handleConnect start");
+      console.debug(
+        "[StellarCard] sorobanReact snapshot",
+        Object.keys(sorobanReact || {})
+      );
       // Ensure Freighter is available and permissioned before using the connector
       const hasFreighter = await freighterIsConnected();
+      console.debug("[StellarCard] freighterIsConnected ->", hasFreighter);
       if (!hasFreighter) {
         setError(
           "Freighter extension not detected. Please install and try again."
         );
+        console.warn("[StellarCard] Freighter not detected");
         return;
       }
 
       const allowed = await freighterIsAllowed();
+      console.debug("[StellarCard] freighterIsAllowed ->", allowed);
       if (!allowed) {
+        console.debug(
+          "[StellarCard] Requesting Freighter permission via setAllowed()"
+        );
         await freighterSetAllowed();
       }
 
       // This prompts Freighter to expose the public key if not already approved
-      await freighterGetPublicKey();
+      const addr = await freighterGetAddress();
+      console.debug("[StellarCard] freighterGetAddress ->", addr);
+      const extracted = typeof addr === "string" ? addr : addr?.address;
+      if (extracted) setWalletAddress(extracted);
+
+      // Check Freighter's selected network
+      const networkInfo = await freighterGetNetwork();
+      console.debug("[StellarCard] freighterGetNetwork ->", networkInfo);
 
       // Now let soroban-react establish the session
-      await connect();
+      console.debug("[StellarCard] Calling sorobanReact.connect()");
+      let result;
+      try {
+        if (sorobanReact?.connectors && sorobanReact.connectors.length > 0) {
+          console.debug(
+            "[StellarCard] Connecting with explicit connector",
+            sorobanReact.connectors[0]
+          );
+          result = await connect({ connector: sorobanReact.connectors[0] });
+        } else {
+          result = await connect();
+        }
+      } catch (innerErr) {
+        console.error("[StellarCard] connect threw", innerErr);
+        throw innerErr;
+      }
+      console.debug("[StellarCard] connect resolved", result);
+      console.debug("[StellarCard] post-connect state", {
+        activeChain: sorobanReact.activeChain,
+        address: sorobanReact.address,
+        localAddress: extracted,
+      });
     } catch (err) {
+      console.error("[StellarCard] handleConnect error", err);
       setError(err.message);
     }
   };
@@ -99,6 +162,7 @@ function App() {
     setTotalSupply(0);
     setTokenOwner("");
     setTokenUri("");
+    setWalletAddress(null);
   };
 
   const handleQueryToken = async () => {
@@ -106,14 +170,17 @@ function App() {
     try {
       setLoading(true);
       setError(null);
+      console.debug("[StellarCard] Query token", { queryTokenId });
 
       const tokenId = parseInt(queryTokenId);
       const ownerResult = await contract.owner_of({ token_id: tokenId });
       const uriResult = await contract.token_uri({ token_id: tokenId });
+      console.debug("[StellarCard] Query results", { ownerResult, uriResult });
 
       setTokenOwner(ownerResult.result);
       setTokenUri(uriResult.result);
     } catch (err) {
+      console.error("[StellarCard] handleQueryToken error", err);
       setError(err.message);
       setTokenOwner("");
       setTokenUri("");
@@ -123,18 +190,22 @@ function App() {
   };
 
   const handlePublicMint = async () => {
-    if (!contract || !address) {
+    if (!contract || !walletAddress) {
       setError("Please connect your wallet first");
       return;
     }
     try {
       setLoading(true);
       setError(null);
+      console.debug("[StellarCard] Public mint requested", {
+        to: walletAddress,
+      });
 
-      await contract.public_mint({ to: address });
+      await contract.public_mint({ to: walletAddress });
       await loadTotalSupply();
       alert("Card minted successfully!");
     } catch (err) {
+      console.error("[StellarCard] handlePublicMint error", err);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -149,16 +220,22 @@ function App() {
     try {
       setLoading(true);
       setError(null);
+      console.debug("[StellarCard] Admin mint requested", {
+        to: mintTo,
+        uri: mintUri,
+      });
 
       const { result } = await contract.admin_mint({
         to: mintTo,
         uri: mintUri,
       });
+      console.debug("[StellarCard] Admin mint result", { result });
       await loadTotalSupply();
       alert(`Card minted successfully! Token ID: ${result}`);
       setMintTo("");
       setMintUri("");
     } catch (err) {
+      console.error("[StellarCard] handleAdminMint error", err);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -173,6 +250,11 @@ function App() {
     try {
       setLoading(true);
       setError(null);
+      console.debug("[StellarCard] Transfer requested", {
+        from: transferFrom,
+        to: transferTo,
+        tokenId: transferTokenId,
+      });
 
       const tokenId = parseInt(transferTokenId);
       await contract.transfer({
@@ -180,6 +262,7 @@ function App() {
         to: transferTo,
         token_id: tokenId,
       });
+      console.debug("[StellarCard] Transfer completed");
 
       alert("Card transferred successfully!");
       setTransferFrom("");
@@ -191,6 +274,7 @@ function App() {
         await handleQueryToken();
       }
     } catch (err) {
+      console.error("[StellarCard] handleTransfer error", err);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -202,10 +286,11 @@ function App() {
       <header className="app-header">
         <h1>🎴 Stellar Card NFT</h1>
         <div className="wallet-section">
-          {address ? (
+          {walletAddress ? (
             <div className="wallet-info">
               <p>
-                Connected: {address.slice(0, 8)}...{address.slice(-8)}
+                Connected: {walletAddress.slice(0, 8)}...
+                {walletAddress.slice(-8)}
               </p>
               <button onClick={handleDisconnect} className="btn btn-secondary">
                 Disconnect
@@ -282,7 +367,7 @@ function App() {
           <div className="form-group">
             <button
               onClick={handlePublicMint}
-              disabled={loading || !contract || !address}
+              disabled={loading || !contract || !walletAddress}
               className="btn btn-primary"
             >
               {loading ? "Minting..." : "Mint Card (Public)"}
