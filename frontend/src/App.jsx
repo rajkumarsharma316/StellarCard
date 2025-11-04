@@ -42,46 +42,52 @@ function App() {
 
   // Initialize contract when wallet is connected
   useEffect(() => {
-    console.debug("[StellarCard] useEffect fired", {
-      activeChain,
-      address: walletAddress,
-    });
-    if (activeChain && walletAddress) {
-      console.debug("[StellarCard] Initializing contract client", {
-        network: "testnet",
-        address: walletAddress,
-      });
-      const contractClient = new Client.Client({
-        ...Client.networks.testnet,
-        rpcUrl: "https://soroban-testnet.stellar.org:443",
-        contractId: CONTRACT_ID,
-        wallet: {
-          address: walletAddress,
-          signTransaction: async (xdr) => {
-            const res = await freighterSignTransaction(xdr, {
-              network: "TESTNET",
-              networkPassphrase: "Test SDF Network ; September 2015",
-              address: walletAddress,
-            });
-            return res?.signedTxXdr ?? res;
-          },
-        },
-      });
-      setContract(contractClient);
-      loadTotalSupply();
-    } else {
-      console.debug(
-        "[StellarCard] No activeChain or address; clearing contract"
+    if (!walletAddress) {
+      setContract(null);
+      return;
+    }
+
+    if (
+      !CONTRACT_ID ||
+      CONTRACT_ID === "CDQ4LCGKICDNAQKRFGPCTDVDNWUU7JIVXGWKGSPA3A5A44Q45PCB7PD4"
+    ) {
+      console.warn(
+        "[StellarCard] CONTRACT_ID is not configured. Please set VITE_CONTRACT_ID in your .env"
+      );
+      setError(
+        "Contract ID is missing. Update VITE_CONTRACT_ID in your .env and restart the app."
       );
       setContract(null);
+      return;
     }
-  }, [activeChain, walletAddress, sorobanReact]);
 
-  const loadTotalSupply = async () => {
-    if (!contract) return;
+    const contractClient = new Client.Client({
+      ...Client.networks.testnet,
+      rpcUrl: "https://soroban-testnet.stellar.org:443",
+      contractId: CONTRACT_ID,
+      wallet: {
+        address: walletAddress,
+        signTransaction: async (xdr) => {
+          const res = await freighterSignTransaction(xdr, {
+            network: "TESTNET",
+            networkPassphrase: "Test SDF Network ; September 2015",
+            address: walletAddress,
+          });
+          return res?.signedTxXdr ?? res;
+        },
+      },
+    });
+
+    setError(null);
+    setContract(contractClient);
+    loadTotalSupply(contractClient);
+  }, [activeChain, walletAddress]);
+
+  const loadTotalSupply = async (client = contract) => {
+    if (!client) return;
     try {
       setLoading(true);
-      const { result } = await contract.total_supply();
+      const { result } = await client.total_supply();
       setTotalSupply(result);
     } catch (err) {
       setError(err.message);
@@ -92,50 +98,46 @@ function App() {
 
   const handleConnect = async () => {
     try {
-      console.debug("[StellarCard] handleConnect start");
-      console.debug(
-        "[StellarCard] sorobanReact snapshot",
-        Object.keys(sorobanReact || {})
-      );
       // Ensure Freighter is available and permissioned before using the connector
       const hasFreighter = await freighterIsConnected();
-      console.debug("[StellarCard] freighterIsConnected ->", hasFreighter);
       if (!hasFreighter) {
         setError(
           "Freighter extension not detected. Please install and try again."
         );
-        console.warn("[StellarCard] Freighter not detected");
         return;
       }
 
       const allowed = await freighterIsAllowed();
-      console.debug("[StellarCard] freighterIsAllowed ->", allowed);
       if (!allowed) {
-        console.debug(
-          "[StellarCard] Requesting Freighter permission via setAllowed()"
-        );
         await freighterSetAllowed();
       }
 
       // This prompts Freighter to expose the public key if not already approved
       const addr = await freighterGetAddress();
-      console.debug("[StellarCard] freighterGetAddress ->", addr);
       const extracted = typeof addr === "string" ? addr : addr?.address;
-      if (extracted) setWalletAddress(extracted);
+      if (!extracted) {
+        setError("Unable to retrieve Freighter address.");
+        return;
+      }
+      setWalletAddress(extracted);
 
       // Check Freighter's selected network
       const networkInfo = await freighterGetNetwork();
-      console.debug("[StellarCard] freighterGetNetwork ->", networkInfo);
+      if (
+        networkInfo?.networkPassphrase &&
+        networkInfo.networkPassphrase !==
+          Client.networks.testnet.networkPassphrase
+      ) {
+        setError(
+          `Freighter is set to ${networkInfo.network}. Switch to Testnet in Freighter and retry.`
+        );
+        return;
+      }
 
       // Now let soroban-react establish the session
-      console.debug("[StellarCard] Calling sorobanReact.connect()");
       let result;
       try {
         if (sorobanReact?.connectors && sorobanReact.connectors.length > 0) {
-          console.debug(
-            "[StellarCard] Connecting with explicit connector",
-            sorobanReact.connectors[0]
-          );
           result = await connect({ connector: sorobanReact.connectors[0] });
         } else {
           result = await connect();
@@ -144,12 +146,11 @@ function App() {
         console.error("[StellarCard] connect threw", innerErr);
         throw innerErr;
       }
-      console.debug("[StellarCard] connect resolved", result);
-      console.debug("[StellarCard] post-connect state", {
-        activeChain: sorobanReact.activeChain,
-        address: sorobanReact.address,
-        localAddress: extracted,
-      });
+      if (!result && !sorobanReact.address) {
+        console.warn(
+          "Freighter connected but SorobanReact returned no address."
+        );
+      }
     } catch (err) {
       console.error("[StellarCard] handleConnect error", err);
       setError(err.message);
@@ -320,7 +321,7 @@ function App() {
               <label>Total Supply</label>
               <div className="stat-value">{totalSupply}</div>
               <button
-                onClick={loadTotalSupply}
+                onClick={() => loadTotalSupply()}
                 disabled={loading || !contract}
                 className="btn btn-small"
               >
@@ -354,9 +355,23 @@ function App() {
               <div>
                 <strong>Owner:</strong> {tokenOwner}
               </div>
-              <div>
+              <div style={{ marginTop: "0.25rem" }}>
                 <strong>URI:</strong> {tokenUri}
               </div>
+              {tokenUri?.startsWith("ipfs://") && (
+                <div style={{ marginTop: "0.5rem" }}>
+                  <a
+                    href={`https://ipfs.io/ipfs/${tokenUri.replace(
+                      "ipfs://",
+                      ""
+                    )}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open on IPFS gateway ↗
+                  </a>
+                </div>
+              )}
             </div>
           )}
         </section>
