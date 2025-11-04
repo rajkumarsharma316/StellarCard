@@ -30,10 +30,15 @@ function App() {
   const [queryTokenId, setQueryTokenId] = useState("");
   const [tokenOwner, setTokenOwner] = useState("");
   const [tokenUri, setTokenUri] = useState("");
+  const [tokenMetadata, setTokenMetadata] = useState(null);
+  const [metadataLoading, setMetadataLoading] = useState(false);
+  const [metadataError, setMetadataError] = useState(null);
 
   // Mint states
   const [mintTo, setMintTo] = useState("");
   const [mintUri, setMintUri] = useState("");
+  const [minting, setMinting] = useState(false);
+  const [mintElapsed, setMintElapsed] = useState(0);
 
   // Transfer states
   const [transferFrom, setTransferFrom] = useState("");
@@ -47,10 +52,7 @@ function App() {
       return;
     }
 
-    if (
-      !CONTRACT_ID ||
-      CONTRACT_ID === "CDQ4LCGKICDNAQKRFGPCTDVDNWUU7JIVXGWKGSPA3A5A44Q45PCB7PD4"
-    ) {
+    if (!CONTRACT_ID) {
       console.warn(
         "[StellarCard] CONTRACT_ID is not configured. Please set VITE_CONTRACT_ID in your .env"
       );
@@ -171,6 +173,8 @@ function App() {
     try {
       setLoading(true);
       setError(null);
+      setMetadataError(null);
+      setTokenMetadata(null);
       console.debug("[StellarCard] Query token", { queryTokenId });
 
       const tokenId = parseInt(queryTokenId);
@@ -180,11 +184,32 @@ function App() {
 
       setTokenOwner(ownerResult.result);
       setTokenUri(uriResult.result);
+
+      // Fetch IPFS metadata if URI is an ipfs:// link
+      if (uriResult.result && uriResult.result.startsWith("ipfs://")) {
+        setMetadataLoading(true);
+        try {
+          const gatewayUrl = `https://ipfs.io/ipfs/${uriResult.result.replace(
+            "ipfs://",
+            ""
+          )}`;
+          const resp = await fetch(gatewayUrl);
+          if (!resp.ok) throw new Error(`IPFS fetch failed (${resp.status})`);
+          const json = await resp.json();
+          setTokenMetadata(json);
+        } catch (fetchErr) {
+          console.error("[StellarCard] IPFS metadata fetch failed", fetchErr);
+          setMetadataError(fetchErr.message);
+        } finally {
+          setMetadataLoading(false);
+        }
+      }
     } catch (err) {
       console.error("[StellarCard] handleQueryToken error", err);
       setError(err.message);
       setTokenOwner("");
       setTokenUri("");
+      setTokenMetadata(null);
     } finally {
       setLoading(false);
     }
@@ -196,20 +221,47 @@ function App() {
       return;
     }
     try {
-      setLoading(true);
+      // Independent mint progress UI so rest of the app stays responsive
+      setMinting(true);
+      setMintElapsed(0);
       setError(null);
       console.debug("[StellarCard] Public mint requested", {
         to: walletAddress,
       });
 
+      // Start a simple seconds timer
+      const start = Date.now();
+      const t = setInterval(() => {
+        setMintElapsed(Math.floor((Date.now() - start) / 1000));
+      }, 1000);
+
       await contract.public_mint({ to: walletAddress });
+
+      clearInterval(t);
+      setMinting(false);
+      // Infer token id from total supply after confirmation (zero-based -> tsAfter-1)
+      let mintedIdText = "";
+      try {
+        await new Promise((r) => setTimeout(r, 800));
+        const { result: tsAfter } = await contract.total_supply();
+        if (typeof tsAfter === "number" && tsAfter > 0) {
+          mintedIdText = String(tsAfter - 1);
+        }
+      } catch (_e) {}
+
       await loadTotalSupply();
-      alert("Card minted successfully!");
+
+      const secs = Math.max(1, Math.floor((Date.now() - start) / 1000));
+      alert(
+        mintedIdText
+          ? `Card minted successfully! Token ID: ${mintedIdText} (in ${secs}s)`
+          : `Card minted successfully! (in ${secs}s)`
+      );
     } catch (err) {
       console.error("[StellarCard] handlePublicMint error", err);
       setError(err.message);
     } finally {
-      setLoading(false);
+      setMinting(false);
     }
   };
 
@@ -372,6 +424,85 @@ function App() {
                   </a>
                 </div>
               )}
+
+              {/* Metadata preview */}
+              {(metadataLoading || tokenMetadata || metadataError) && (
+                <div style={{ marginTop: "1rem" }}>
+                  <div style={{ fontWeight: 700, marginBottom: "0.5rem" }}>
+                    Metadata
+                  </div>
+                  {metadataLoading && <div>Loading metadata…</div>}
+                  {metadataError && (
+                    <div style={{ color: "#c33" }}>
+                      Failed to load metadata: {metadataError}
+                    </div>
+                  )}
+                  {tokenMetadata && (
+                    <div className="card-preview">
+                      <div className="card-preview-header">
+                        <div className="card-title">
+                          {tokenMetadata.name || "Unnamed Card"}
+                        </div>
+                      </div>
+                      <div className="card-preview-body">
+                        {(() => {
+                          let img = tokenMetadata.image;
+                          // treat placeholder-like values as missing
+                          const looksPlaceholder =
+                            typeof img === "string" &&
+                            /Your.*ImageHashHere/i.test(img);
+                          if (looksPlaceholder) {
+                            img = undefined;
+                          }
+                          if (
+                            typeof img === "string" &&
+                            img.startsWith("ipfs://")
+                          ) {
+                            img = `https://ipfs.io/ipfs/${img.replace(
+                              "ipfs://",
+                              ""
+                            )}`;
+                          }
+                          return img ? (
+                            <img
+                              src={img}
+                              alt={tokenMetadata.name || "Card image"}
+                              className="card-image"
+                            />
+                          ) : (
+                            <div className="card-image placeholder">
+                              No image available
+                            </div>
+                          );
+                        })()}
+                        {tokenMetadata.description && (
+                          <div className="card-desc">
+                            {tokenMetadata.description}
+                          </div>
+                        )}
+                        {Array.isArray(tokenMetadata.attributes) &&
+                          tokenMetadata.attributes.length > 0 && (
+                            <div className="card-attrs">
+                              {tokenMetadata.attributes.map((attr, i) => (
+                                <div
+                                  key={`${attr?.trait_type || "attr"}-${i}`}
+                                  className="card-attr"
+                                >
+                                  <span className="attr-name">
+                                    {attr?.trait_type || "Attribute"}:
+                                  </span>
+                                  <span className="attr-value">
+                                    {String(attr?.value ?? "")}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </section>
@@ -382,10 +513,10 @@ function App() {
           <div className="form-group">
             <button
               onClick={handlePublicMint}
-              disabled={loading || !contract || !walletAddress}
+              disabled={minting || !contract || !walletAddress}
               className="btn btn-primary"
             >
-              {loading ? "Minting..." : "Mint Card (Public)"}
+              {minting ? `Minting… ${mintElapsed}s` : "Mint Card (Public)"}
             </button>
             <p className="form-help">
               Mints a random card to your connected wallet
