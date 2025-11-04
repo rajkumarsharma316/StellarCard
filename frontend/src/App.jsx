@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import {
-  isConnected as freighterIsConnected,
-  isAllowed as freighterIsAllowed,
-  setAllowed as freighterSetAllowed,
-  getAddress as freighterGetAddress,
-  getNetwork as freighterGetNetwork,
-  signTransaction as freighterSignTransaction,
+  isConnected,
+  isAllowed,
+  setAllowed,
+  requestAccess,
+  getAddress,
+  getNetwork,
+  signTransaction,
 } from "@stellar/freighter-api";
 import { useSorobanReact } from "@soroban-react/core";
 import * as Client from "@stellar_card/index.js";
@@ -70,12 +71,15 @@ function App() {
       wallet: {
         address: walletAddress,
         signTransaction: async (xdr) => {
-          const res = await freighterSignTransaction(xdr, {
+          const res = await signTransaction(xdr, {
             network: "TESTNET",
             networkPassphrase: "Test SDF Network ; September 2015",
             address: walletAddress,
           });
-          return res?.signedTxXdr ?? res;
+          if (res.error) {
+            throw new Error(res.error);
+          }
+          return res.signedTxXdr;
         },
       },
     });
@@ -100,38 +104,54 @@ function App() {
 
   const handleConnect = async () => {
     try {
-      // Ensure Freighter is available and permissioned before using the connector
-      const hasFreighter = await freighterIsConnected();
-      if (!hasFreighter) {
+      // Check if Freighter extension is installed and connected
+      const connectedResult = await isConnected();
+      if (connectedResult.error || !connectedResult.isConnected) {
         setError(
-          "Freighter extension not detected. Please install and try again."
+          "Freighter extension not detected. Please install Freighter wallet extension and try again."
         );
         return;
       }
 
-      const allowed = await freighterIsAllowed();
-      if (!allowed) {
-        await freighterSetAllowed();
+      // Check if site is allowed to interact with Freighter
+      const allowedResult = await isAllowed();
+      if (allowedResult.error || !allowedResult.isAllowed) {
+        // Request permission from user - this will prompt if needed
+        const setAllowedResult = await setAllowed();
+        if (setAllowedResult.error || !setAllowedResult.isAllowed) {
+          setError(
+            "Permission to access Freighter was denied. Please approve this site in Freighter settings."
+          );
+          return;
+        }
       }
 
-      // This prompts Freighter to expose the public key if not already approved
-      const addr = await freighterGetAddress();
-      const extracted = typeof addr === "string" ? addr : addr?.address;
-      if (!extracted) {
-        setError("Unable to retrieve Freighter address.");
+      // Use requestAccess to get address - this handles both permission and address retrieval
+      const accessResult = await requestAccess();
+      if (accessResult.error || !accessResult.address) {
+        setError(
+          accessResult.error ||
+            "Unable to retrieve Freighter address. Make sure Freighter is unlocked and try again."
+        );
         return;
       }
-      setWalletAddress(extracted);
+
+      setWalletAddress(accessResult.address);
 
       // Check Freighter's selected network
-      const networkInfo = await freighterGetNetwork();
-      if (
-        networkInfo?.networkPassphrase &&
-        networkInfo.networkPassphrase !==
+      const networkResult = await getNetwork();
+      if (networkResult.error) {
+        console.warn(
+          "[StellarCard] Failed to get network info",
+          networkResult.error
+        );
+      } else if (
+        networkResult.networkPassphrase &&
+        networkResult.networkPassphrase !==
           Client.networks.testnet.networkPassphrase
       ) {
         setError(
-          `Freighter is set to ${networkInfo.network}. Switch to Testnet in Freighter and retry.`
+          `Freighter is set to ${networkResult.network}. Switch to Testnet in Freighter and retry.`
         );
         return;
       }
