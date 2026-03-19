@@ -186,8 +186,11 @@ Metadata format:
    ```
 
 See [frontend/README.md](./frontend/README.md) for more details.
+
+```bash
 Video Link ⬇️
 https://drive.google.com/file/d/16rVkNCJnHJRFv74Mb8UjsWwG86tmKVPq/view?usp=drive_link
+```
 
 ## 📚 Resources
 
